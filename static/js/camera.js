@@ -1,87 +1,84 @@
-/**
- * Camera helpers: permission, start/stop, front/rear switch.
- */
-const Camera = (() => {
-  let stream = null;
-  let currentFacing = "user"; // user = front, environment = rear
+/** Camera access and cleanup. Every failure is mapped to a plain-English message. */
+export class CameraError extends Error {
+  constructor(code, message) { super(message); this.code = code; }
+}
 
-  async function listDevices() {
+function mapError(e) {
+  switch (e && e.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return new CameraError('denied', 'Camera permission was denied. Allow camera access in your browser settings and try again.');
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return new CameraError('not_found', 'No camera was found on this device.');
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return new CameraError('in_use', 'The camera is in use by another app or cannot be started.');
+    default:
+      return new CameraError('unknown', 'The camera could not be started.');
+  }
+}
+
+export class Camera {
+  constructor(video) {
+    this.video = video;
+    this.stream = null;
+    this.facing = 'user';
+  }
+
+  get active() { return !!this.stream; }
+
+  async start(facing = this.facing) {
+    this.stop();
+    if (!window.isSecureContext) {
+      throw new CameraError('insecure', 'The camera requires a secure (HTTPS) connection.');
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new CameraError('unsupported', 'This browser does not support camera access.');
+    }
+    const base = { width: { ideal: 1280 }, height: { ideal: 720 } };
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      return devices.filter((d) => d.kind === "videoinput");
-    } catch {
-      return [];
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { ...base, facingMode: { ideal: facing } }, audio: false });
+    } catch (e) {
+      if (e && (e.name === 'OverconstrainedError' || e.name === 'ConstraintNotSatisfiedError')) {
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        } catch (e2) { throw mapError(e2); }
+      } else { throw mapError(e); }
     }
+    this.facing = facing;
+    const reported = this.stream.getVideoTracks()[0].getSettings().facingMode;
+    // Webcams usually report no facingMode; treat them as user-facing (mirrored preview).
+    this.video.classList.toggle('mirror', !reported || reported === 'user');
+    this.video.srcObject = this.stream;
+    try { await this.video.play(); } catch (e) { this.stop(); throw mapError(e); }
+    await this._waitForFrame();
   }
 
-  async function start(videoEl, facingMode = currentFacing) {
-    stop();
-    currentFacing = facingMode;
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 640 },
-        height: { ideal: 480 },
-      },
-    };
+  _waitForFrame() {
+    return new Promise((resolve) => {
+      const v = this.video;
+      if (v.videoWidth > 0) return resolve();
+      v.addEventListener('loadeddata', () => resolve(), { once: true });
+    });
+  }
+
+  async hasMultipleCameras() {
     try {
-      stream = await navigator.mediaDevices.getUserMedia(constraints);
-      videoEl.srcObject = stream;
-      await videoEl.play();
-      return { ok: true };
-    } catch (err) {
-      let message = "Unable to access camera.";
-      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-        message = "Camera permission denied. Please allow camera access and try again.";
-      } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-        message = "No camera found on this device.";
-      } else if (err.name === "NotReadableError") {
-        message = "Camera is already in use by another application.";
-      }
-      return { ok: false, error: message, name: err.name };
-    }
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      return devs.filter((d) => d.kind === 'videoinput').length > 1;
+    } catch { return false; }
   }
 
-  function stop() {
-    if (stream) {
-      stream.getTracks().forEach((t) => t.stop());
-      stream = null;
-    }
+  async switch() {
+    await this.start(this.facing === 'user' ? 'environment' : 'user');
   }
 
-  function isActive() {
-    return !!stream && stream.active;
+  stop() {
+    if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.video.pause();
+    this.video.srcObject = null;
   }
-
-  async function switchCamera(videoEl) {
-    const next = currentFacing === "user" ? "environment" : "user";
-    return start(videoEl, next);
-  }
-
-  function captureFrame(videoEl, canvasEl) {
-    const w = videoEl.videoWidth;
-    const h = videoEl.videoHeight;
-    if (!w || !h) return null;
-    canvasEl.width = w;
-    canvasEl.height = h;
-    const ctx = canvasEl.getContext("2d");
-    // Mirror front camera for natural selfie feel in preview; capture as-is
-    ctx.drawImage(videoEl, 0, 0, w, h);
-    return ctx.getImageData(0, 0, w, h);
-  }
-
-  return {
-    start,
-    stop,
-    isActive,
-    switchCamera,
-    captureFrame,
-    listDevices,
-    get facing() {
-      return currentFacing;
-    },
-  };
-})();
-
-window.Camera = Camera;
+}

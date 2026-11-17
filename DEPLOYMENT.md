@@ -1,248 +1,120 @@
-# ডেপ্লয়মেন্ট গাইড — ফেস রিকগনিশন ওয়েব অ্যাপ
+# Deployment guide (MongoDB Atlas Free + GitHub + Render Free)
 
-এই নথিতে MongoDB Atlas, মডেল ফাইল, GitHub এবং Render Free-তে ডেপ্লয় করার পদ্ধতি তুলে ধরা হয়েছে।
+Dashboard wording changes over time. If a button or menu is named differently, look for the
+closest equivalent. Nothing here was executed against live Atlas/Render accounts (see README).
 
----
+## A. Create a MongoDB Atlas free cluster
+1. Sign up at mongodb.com/atlas and create an organisation and project.
+2. Click **Create** (or **Build a Database**), choose the **M0 Free** tier, pick a nearby region, name it e.g. `face-cluster`.
+3. Wait until the cluster is ready.
 
-## A. MongoDB Atlas Free ক্লাস্টার তৈরি
+## B. Create a database user
+1. **Database Access** -> **Add New Database User** -> authentication: Password.
+2. Username e.g. `face_app`; click **Autogenerate Secure Password** and copy it somewhere safe (use a password manager, never GitHub).
+3. Privileges: **Specific Privileges** -> role `readWrite` on database `face_recognition_db` only. Do not give admin roles.
+   (Creating indexes needs `readWrite` plus index rights; `readWrite` includes `createIndex`/`collMod` on its own collections.)
 
-1. https://www.mongodb.com/cloud/atlas-এ যান এবং সাইন আপ / লগ ইন করুন।
-2. একটি **Free (M0)** ক্লাস্টার তৈরি করুন। ব্যবহারকারীদের কাছাকাছি কোনো অঞ্চল বেছে নিন।
-3. ক্লাস্টারের অবস্থা **Available** হওয়া পর্যন্ত অপেক্ষা করুন।
+## C. Network access
+Render Free has no fixed outbound IP, so the only way to let it reach Atlas is to allow all addresses.
+1. **Network Access** -> **Add IP Address** -> **Allow access from anywhere** (`0.0.0.0/0`).
+2. This is an explicit, justified exception: access is still protected by TLS and the long random password of a least-privilege user.
+   If you move to a host with a fixed IP (or a paid Render plan with static outbound IPs), replace this with that IP.
 
----
+## D. Get the connection string
+1. **Database** -> **Connect** -> **Drivers** (Python) -> copy the `mongodb+srv://...` string.
+2. Replace `<db_user>` and `<db_password>` (URL-encode special characters in the password, e.g. `@` becomes `%40`).
+3. The database and collection are created automatically on first write.
 
-## B. ডেটাবেস ব্যবহারকারী তৈরি
+## E. Render environment variables (set in step H)
+| Key | Value |
+|---|---|
+| `MONGODB_URI` | the string from D (mark as secret) |
+| `TRUST_PROXY` | `true` |
+| `PYTHON_VERSION` | `3.12.3` |
+| `RETENTION_DAYS` | e.g. `90` (optional) |
+Others are optional; see README.
 
-1. Atlas → **Database Access** → **Add New Database User**-এ যান।
-2. Authentication: Password নির্বাচন করুন।
-3. Username ও শক্তিশালী password দিন (দুটিই সংরক্ষণ করুন)।
-4. Privileges: **Read and write to any database** নির্বাচন করুন (অথবা `face_recognition_db`-তে সীমাবদ্ধ রাখুন)।
-5. ব্যবহারকারী তৈরি করুন।
-
----
-
-## C. নিরাপদ নেটওয়ার্ক অ্যাক্সেস কনফিগার
-
-1. Atlas → **Network Access** → **Add IP Address**-এ যান।
-2. Render-এর ডায়নামিক IP-এর জন্য সাধারণত **Allow Access from Anywhere** (`0.0.0.0/0`) চালু করতে হয়।
-   - বিনামূল্যের সার্ভারলেস/PaaS হোস্টে এটি প্রচলিত। পরে স্ট্যাটিক outbound IP যোগ করলে অ্যাক্সেস সীমিত করুন।
-3. নিশ্চিত করুন।
-
-**দ্রষ্টব্য:** ক্লাস্টারকে authentication ছাড়া রাখবেন না। ডেটাবেস ব্যবহারকারীর জন্য সব সময় শক্তিশালী password ব্যবহার করুন।
-
----
-
-## D. MongoDB সংযোগ স্ট্রিং সংগ্রহ
-
-1. Atlas → **Database** → **Connect** → **Drivers**-এ যান।
-2. SRV string কপি করুন, যেমন:
-   ```
-   mongodb+srv://<username>:<password>@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority
-   ```
-
-mongodb+srv://face_admin:zwmDawYyq6H7TGHf@arnab.r8slxp9.mongodb.net/?retryWrites=true&w=majority
-mongodb+srv://face_admin:zwmDawYyq6H7TGHf@arnab.r8slxp9.mongodb.net/face_recognition_db?retryWrites=true&w=majority
-
-3. `<username>` এবং `<password>`-এর জায়গায় আপনার তথ্য বসান (password-এ বিশেষ অক্ষর থাকলে URL-encode করুন)।
-4. ঐচ্ছিক: ডেটাবেসের নাম যোগ করুন: `...mongodb.net/face_recognition_db?retryWrites=true&w=majority`
-
----
-
-## E. মডেল ফাইল (আবশ্যক)
-
-ONNX Runtime Web দিয়ে **ব্রাউজারেই** মুখ শনাক্তকরণ ও embedding তৈরি হয়।
-
-`static/models/`-এর মধ্যে অন্তত একটি **recognizer** ONNX ফাইল রাখুন:
-
-| ফাইল (যেকোনো একটি নাম চলবে) | কাজ | সাধারণ আকার |
-|---------------------------------|------|--------------|
-| `w600k_mbf.onnx` / `mobilefacenet.onnx` | 512-d embedding (প্রস্তাবিত) | ~4–14 MB |
-| `det_10g.onnx` / `ultraface-rfb-320.onnx` | ঐচ্ছিক detector | ~1–5 MB |
-
-### প্রস্তাবিত উৎস (পুনর্বিতরণের আগে লাইসেন্স যাচাই করুন)
-
-- InsightFace model zoo (buffalo_s / MobileFaceNet `w600k_mbf`):  
-  https://github.com/deepinsight/insightface/tree/master/model_zoo  
-  অফিসিয়াল প্যাকগুলো GitHub Releases / InsightFace wiki-তে থাকা Google Drive লিংকে প্রকাশিত হয়।
-- EdgeFace-XXS / XS (Apache-সমর্থিত ছোট মডেল):\
-  https://github.com/yakhyo/edgeface-onnx
-
-**লাইসেন্স:** ডাউনলোড করা নির্দিষ্ট ফাইলটি পুনর্বিতরণ করা যাবে কি না নিশ্চিত করুন। লাইসেন্সে ফাইলটি প্যাকেজ করার অনুমতি না থাকলে মডেলগুলো পাবলিক রিপোজিটরির বাইরে রাখুন এবং ডেপ্লয়কারীদের জন্য ডাউনলোডের ধাপ লিখে দিন।
-
-ডাউনলোডের পর:
-
-```bash
-mkdir -p static/models
-# copy your .onnx files into static/models/
+## F. Upload the project to GitHub
 ```
-
-অ্যাপে ব্যবহৃত preprocessing (মডেলটি যে পদ্ধতিতে প্রশিক্ষিত, তার সঙ্গে মিলতে হবে):
-
-- ইনপুট: 112×112 RGB মুখের crop
-- Normalize: `(pixel - 127.5) / 127.5`
-- আউটপুট: L2-normalized embedding (MobileFaceNet ArcFace-এর জন্য 512-d)
-
-recognizer মডেল না থাকলে UI-তে ONNX ফাইল যোগ করার জন্য স্পষ্ট ত্রুটি বার্তা দেখানো হবে।
-
----
-
-## F. প্রজেক্ট GitHub-এ আপলোড
-
-1. GitHub-এ একটি নতুন **public** repository তৈরি করুন (লোকালেই README থাকলে README ছাড়া তৈরি করুন)।
-2. লোকাল মেশিনে:
-
-```bash
 cd face-recognition
 git init
 git add .
-git commit -m "Initial face recognition web app"
+git status            # confirm .env is NOT listed and no *.onnx files are listed
+git commit -m "Initial commit"
 git branch -M main
-git remote add origin https://github.com/YOUR_USER/YOUR_REPO.git
+git remote add origin https://github.com/<your-user>/<your-repo>.git
 git push -u origin main
 ```
+Create the empty public repository on github.com first (no README/licence/.gitignore). Never commit `.env`,
+the connection string, or any real face images or embeddings. Add a LICENSE file of your choice for your own code.
 
-**কখনোই commit করবেন না** `.env`, প্রকৃত credentials বা প্রকৃত biometric data।
+## G. Connect GitHub to Render
+1. render.com -> sign up with GitHub and authorise access to the repository.
+2. **New +** -> **Web Service** -> select your repository.
 
----
+## H. Deploy
+Settings:
+* Runtime: **Python 3**
+* Build command: `pip install -r requirements.txt && sh scripts/download_models.sh`
+* Start command: `gunicorn app:app --workers 1 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT`
+  (Render ignores `Procfile`; the file is only for hosts that read it.)
+* Instance type: **Free**
+* Health check path: `/api/health`
+* Environment: add the variables from E.
+* Click **Create Web Service**. The first build downloads the models (about 37 MB) from GitHub; if the build fails there, see K.
 
-## G. GitHub-কে Render-এর সঙ্গে যুক্ত করুন
+**Shortcut:** the repo contains `render.yaml`. In Render choose **New + -> Blueprint**, select the repo, and paste `MONGODB_URI` when asked.
 
-1. https://render.com-এ সাইন আপ করুন।
-2. **New** → **Web Service** নির্বাচন করুন।
-3. GitHub account যুক্ত করে repository নির্বাচন করুন।
-4. কনফিগার করুন:
-   - **Name:** যেমন `face-recognition`
-   - **Runtime:** Python
-   - **Build Command:** `pip install -r requirements.txt`
-   - **Start Command:** `Procfile` থাকলে ফাঁকা রাখুন; Render সেটি ব্যবহার করবে।
-   - **Instance type:** Free
+Keep `--workers 1`: the rate limiter lives in process memory, and one worker keeps RAM low.
 
----
+## I. Test the deployed site
+1. `https://<your-service>.onrender.com/api/health` should return `{"database":"ok","status":"ok"}`. If the service was asleep, wait up to about a minute.
+2. `.../api/config` should show `opencv-zoo-sface`, `2021dec`, `128`.
+3. Open the home page, press **Register Face**, tick consent, enter a name, **Start Camera**; wait for the model download.
+4. Capture three samples (front, left, right). Expect "Face registered successfully."
+5. Register the same face again: expect "Face already registered" with the stored name and no new record.
+6. **Recognize Face** with the same person: expect "Match Found" with a similarity score; with an unregistered person: "Unknown Face".
+7. In Atlas **Browse Collections** confirm a document with name, 3 embeddings of 128 numbers, model fields and `created_at`, and no images.
 
-## H. Flask অ্যাপ্লিকেশন ডেপ্লয়
+## J. Test camera permission on Android Chrome
+1. Open the HTTPS Render URL in Chrome (the camera does not work on plain `http://`).
+2. Tap **Start Camera**; Chrome shows a permission prompt. Allow it; the preview must appear.
+3. Denial test: tap Block, then reload and retry: the app must show "Camera permission was denied...". Re-enable in Chrome menu -> Settings -> Site settings -> Camera.
+4. Rear camera: tap **Switch Camera** (only shown when more than one camera exists).
+5. Close the workflow or finish: the camera indicator in the status bar must disappear (camera released).
+6. Rotate the phone and confirm the layout still fits.
+Record your results; the author has not run these.
 
-1. Render → **Environment**-এ নিচের ভেরিয়েবলগুলো যোগ করুন:
+## K. Troubleshooting
+| Symptom | Likely cause / fix |
+|---|---|
+| Build fails in `download_models.sh` ("only N bytes") | GitHub returned an error page or LFS pointer. Run the script locally, check the URLs in the OpenCV Zoo repository, or commit the model files after verifying their licences and remove `static/models/*.onnx` from `.gitignore`. |
+| Page says "face model files are missing" | `static/models/*.onnx` absent in the deployed build; check the build log. |
+| "The face engine library could not be loaded" | jsDelivr blocked or offline; or CSP edited. Self-host `ort.min.js` and its `.wasm` files and update the script tag and CSP. |
+| Detector error "Unexpected face detector outputs" | The detector file is not YuNet 2023mar; use the exact file. |
+| `/api/health` returns 503 `database: unavailable` | Wrong `MONGODB_URI`, password not URL-encoded, user lacks permissions, or `0.0.0.0/0` not added. Read the Render logs (they never include the password). |
+| Everything matches / nothing matches | Check preprocessing (README: RGB vs BGR), then calibrate thresholds. |
+| 429 errors | Per-IP rate limit; wait or raise the `RATE_*` variables. |
+| First request very slow | Render Free spin-down; wait up to about a minute. |
+| Out of memory on Render | Keep one worker; lower `MAX_RECORDS`. |
+| Camera does not start on a phone | Not HTTPS, permission blocked, or camera used by another app. |
+| Registration says "storage limit reached" | `MAX_RECORDS` reached; delete records (L) or raise the limit (Atlas free tier holds 512 MB). |
 
-| Key | Value |
-|-----|--------|
-| `MONGODB_URI` | আপনার Atlas connection string |
-| `MONGODB_DB` | `face_recognition_db` |
-| `SECRET_KEY` | দীর্ঘ random string |
-| `CORS_ORIGINS` | আপনার Render URL, অথবা পরীক্ষার জন্য `*` |
-| `DUPLICATE_THRESHOLD` | `0.55` (ঐচ্ছিক) |
-| `RECOGNITION_THRESHOLD` | `0.48` (ঐচ্ছিক) |
+## L. Owner-authorised data deletion
+There is deliberately no public Delete button. Only the database owner may delete, after verifying
+that the requester is the data subject (or has authority). Keep a log of requests outside the repo.
 
-2. Deploy করুন। প্রথম build শেষ হওয়া পর্যন্ত অপেক্ষা করুন।
-3. সার্ভিসের URL খুলুন।
+Atlas web UI: **Browse Collections** -> `face_recognition_db.registered_faces` -> filter `{ "name": "Jane Doe" }` ->
+inspect the documents (several people can share a name; confirm the right one by `created_at`) -> trash icon -> confirm.
 
-**Free tier সম্পর্কে:**
-
-- কিছুক্ষণ ব্যবহার না হলে সার্ভিস sleep করে → ঘুম থেকে ওঠার পর প্রথম request-এ cold start হয় (30–60+ seconds)।
-- RAM সীমিত (~512 MB)। এই অ্যাপ সার্ভারে AI মডেল লোড করে **না**।
-- স্থায়ী local disk নেই — সব মুখের রেকর্ড MongoDB Atlas-এ থাকে।
-
----
-
-## I. ডেপ্লয় করা ওয়েবসাইট পরীক্ষা
-
-1. `https://YOUR-SERVICE.onrender.com` খুলুন।
-2. Health পরীক্ষা করুন: `https://YOUR-SERVICE.onrender.com/api/health`
-   প্রত্যাশিত ফল: `"database": "connected"`।
-3. মডেল ফাইল যোগ করার পর একটি মুখ নিবন্ধন করুন, তারপর সেটি শনাক্ত করুন।
-4. একই মুখ আবার নিবন্ধনের চেষ্টা করুন — 409-ধরনের বার্তা আসা উচিত।
-
----
-
-## J. Android Chrome-এ ক্যামেরার অনুমতি
-
-1. **HTTPS** ব্যবহার করুন (Render HTTPS দেয়)।
-2. তালা / site settings-এ ট্যাপ করে Camera অনুমতি দিন।
-3. আগে অনুমতি প্রত্যাখ্যান করা হয়ে থাকলে Chrome settings থেকে site permission reset করুন।
-4. Selfie-এর জন্য সামনের ক্যামেরা ব্যবহার করুন; পেছনের ক্যামেরার জন্য **Switch Camera** চাপুন।
-
----
-
-## K. সমস্যা সমাধান
-
-| সমস্যা | যা পরীক্ষা করবেন |
-|-------|----------------|
-| Health-এ database unreachable দেখায় | `MONGODB_URI`, Atlas ব্যবহারকারীর password, Network Access-এ `0.0.0.0/0` |
-| মডেল লোড হয় না | `static/models/`-এর ফাইল, সঠিক `.onnx` নাম, browser console |
-| CORS ত্রুটি | `CORS_ORIGINS`-এ frontend origin আছে কি না |
-| 429 Too many requests | Rate limit settings; 60 seconds অপেক্ষা করুন |
-| Cold start | Free tier-এর sleep; অপেক্ষা করে আবার চেষ্টা করুন |
-| মোবাইলে ক্যামেরা কাজ করে না | HTTPS আবশ্যক; অনুমতি দেওয়া আছে কি না; অন্য কোনো app ক্যামেরা ব্যবহার করছে কি না |
-
----
-
-## L. মালিকের অনুমোদনে ডেটা মুছে ফেলা
-
-নকশা অনুযায়ী **সবার জন্য উন্মুক্ত Delete button নেই**।
-
-কোনো নিবন্ধন মুছতে:
-
-1. MongoDB Atlas-এ লগ ইন করুন → Browse Collections → `face_recognition_db` → `registered_faces`।
-2. `name` বা `_id` দিয়ে নথিটি খুঁজুন।
-3. নথিটি মুছুন।
-
-অথবা একই URI ব্যবহার করে নিরাপদ shell থেকে:
-
-```python
-from pymongo import MongoClient
-from bson import ObjectId
-client = MongoClient("YOUR_URI")
-col = client["face_recognition_db"]["registered_faces"]
-col.delete_one({"_id": ObjectId("...")})
-# or
-col.delete_many({"name": "Person Name"})
+mongosh (connect with your own admin credentials, not the app user's secret from Render):
 ```
-
-Biometric data-এর জন্য আপনার স্থানীয় গোপনীয়তা বিধি অনুযায়ী data-retention policy তৈরি ও অনুসরণ করুন।
-
----
-
-## লোকাল ডেভেলপমেন্ট
-
-```bash
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env
-# edit .env with a local or Atlas URI
-python app.py
+use face_recognition_db
+db.registered_faces.find({ name: "Jane Doe" }, { name: 1, created_at: 1 })
+db.registered_faces.deleteOne({ _id: ObjectId("<id from the find above>") })
+// remove everything (e.g. decommissioning the site):
+db.registered_faces.deleteMany({})
 ```
-
-http://127.0.0.1:5000 খুলুন।
-
-Production-এর কাছাকাছি পরিবেশে চালাতে:
-
-```bash
-gunicorn app:app --bind 0.0.0.0:5000
-```
-
----
-
-## Environment Variables-এর সারাংশ
-
-| Variable | আবশ্যক | বিবরণ |
-|----------|----------|-------------|
-| `MONGODB_URI` | হ্যাঁ | Atlas connection string |
-| `MONGODB_DB` | না | ডিফল্ট `face_recognition_db` |
-| `SECRET_KEY` | হ্যাঁ (prod) | Flask secret |
-| `CORS_ORIGINS` | না | `*` অথবা কমা দিয়ে আলাদা করা origins |
-| `DUPLICATE_THRESHOLD` | না | Duplicate-এর cosine threshold (ডিফল্ট 0.55) |
-| `RECOGNITION_THRESHOLD` | না | Match-এর cosine threshold (ডিফল্ট 0.48) |
-| `UNCERTAIN_THRESHOLD` | না | এর নিচে হলে unknown (ডিফল্ট 0.40) |
-| `RATE_LIMIT_REQUESTS` | না | ডিফল্ট 30 |
-| `RATE_LIMIT_WINDOW_SECONDS` | না | ডিফল্ট 60 |
-| `FLASK_DEBUG` | না | শুধু লোকাল debug-এর জন্য `1` |
-| `PORT` | স্বয়ংক্রিয় | Render সেট করে |
-
----
-
-## আর্কিটেকচার (সংক্ষেপে)
-
-- **Browser:** Camera → ONNX Runtime Web (WASM / ঐচ্ছিক WebGPU) → face embedding।
-- **Server (Render):** Flask + Gunicorn — যাচাই করে, MongoDB-তে embedding সংরক্ষণ/তুলনা করে।
-- **Database:** MongoDB Atlas free cluster — শুধু name + embeddings + model metadata সংরক্ষণ করে (কোনো ছবি নয়)।
+Automatic deletion: a TTL index on `created_at` removes records `RETENTION_DAYS` days after registration
+(default 90; the background task runs roughly every minute). Changing `RETENTION_DAYS` updates the index
+at the next app start. Remember to also delete Atlas backups/snapshots if you enable them (M0 has none).

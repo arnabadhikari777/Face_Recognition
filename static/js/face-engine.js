@@ -1,371 +1,350 @@
 /**
- * Client-side face detection + embedding via ONNX Runtime Web.
+ * Browser-side face engine (ONNX Runtime Web).
  *
- * Expected models (place under /static/models/):
- *   - det_10g.onnx or ultraface-rfb-320.onnx  (face detector)
- *   - w600k_mbf.onnx or mobilefacenet.onnx     (512-d ArcFace-style embedding)
+ *  Detector   : YuNet  face_detection_yunet_2023mar.onnx   (MIT)
+ *  Recognizer : SFace  face_recognition_sface_2021dec.onnx (Apache-2.0)
+ *  Both from https://github.com/opencv/opencv_zoo
  *
- * Primary execution provider: WASM. WebGPU used when available.
+ * Pipeline (identical for registration and recognition):
+ *   frame -> letterbox to SxS -> YuNet (BGR, raw 0..255, CHW) -> boxes + 5 landmarks
+ *   -> similarity-transform the 5 landmarks onto the ArcFace 112x112 template
+ *   -> SFace (RGB, raw 0..255, CHW, 112x112) -> 128-d -> L2 normalise.
+ * Similarity = cosine (dot product of unit vectors).
  *
- * Preprocessing (MobileFaceNet / InsightFace style):
- *   - Crop & align face to 112x112
- *   - RGB, float32
- *   - Normalize: (pixel - 127.5) / 127.5   → range [-1, 1]
- *   - Output L2-normalized 512-d embedding
- *
- * If models are missing, the engine reports a clear error so the UI can guide the user.
+ * NOT TESTED in a real browser by the author: see README "Test results".
  */
-const FaceEngine = (() => {
-  const MODEL_NAME = "mobilefacenet-arcface";
-  const MODEL_VERSION = "1.0";
-  const EMBEDDING_DIM = 512;
-  const INPUT_SIZE = 112;
+export const ENGINE = {
+  modelName: 'opencv-zoo-sface',
+  modelVersion: '2021dec',
+  embeddingDim: 128,
+  detectorUrl: '/static/models/face_detection_yunet_2023mar.onnx',
+  recognizerUrl: '/static/models/face_recognition_sface_2021dec.onnx',
+  detSizes: [640, 320],     // tried in order; first size the detector accepts is used
+  useWebGPU: false,         // WASM only by default: WebGPU can fail at run time on some devices
+  ortBase: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/',  // must match the <script> tag version
+  detScore: 0.7,
+  nmsIou: 0.3,
+  // Quality gates. These are engineering defaults, not calibrated values: tune on real devices.
+  minFaceFrac: 0.18,        // face width / min(video w,h)
+  maxFaceFrac: 0.85,
+  minBrightness: 60, maxBrightness: 200, minContrast: 25,
+  minSharpness: 40,         // variance of the Laplacian on the 112x112 aligned crop
+  frontMaxYaw: 0.15,        // |nose offset| / eye distance
+  sideMinYaw: 0.2, sideMaxYaw: 0.7,
+};
 
-  let ort = null;
-  let detSession = null;
-  let recSession = null;
-  let ready = false;
-  let loadError = null;
+export const SFACE_TEMPLATE = [
+  [38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366], [41.5493, 92.3655], [70.7299, 92.2041]];
 
-  const MODEL_PATHS = {
-    // Prefer smaller / commonly redistributed names; user can rename after download
-    detector: [
-      "/static/models/det_10g.onnx",
-      "/static/models/ultraface-rfb-320.onnx",
-      "/static/models/face_detector.onnx",
-    ],
-    recognizer: [
-      "/static/models/w600k_mbf.onnx",
-      "/static/models/mobilefacenet.onnx",
-      "/static/models/arcface_mobilefacenet.onnx",
-    ],
-  };
+export class Cancelled extends Error {}
+export class ModelError extends Error {
+  constructor(code, message) { super(message); this.code = code; }
+}
 
-  async function loadOrt() {
-    if (window.ort) {
-      ort = window.ort;
-      return;
+/* ---------- pure helpers (unit-testable without a browser) ---------- */
+
+/** Least-squares similarity transform src->dst; returns canvas setTransform(a,b,c,d,e,f) values. */
+export function similarityTransform(src, dst) {
+  const n = src.length;
+  let msx = 0, msy = 0, mdx = 0, mdy = 0;
+  for (let i = 0; i < n; i++) { msx += src[i][0]; msy += src[i][1]; mdx += dst[i][0]; mdy += dst[i][1]; }
+  msx /= n; msy /= n; mdx /= n; mdy /= n;
+  let nr = 0, ni = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    const sx = src[i][0] - msx, sy = src[i][1] - msy, dx = dst[i][0] - mdx, dy = dst[i][1] - mdy;
+    nr += dx * sx + dy * sy; ni += dy * sx - dx * sy; den += sx * sx + sy * sy;
+  }
+  const ar = nr / den, ai = ni / den;
+  return { a: ar, b: ai, c: -ai, d: ar, e: mdx - (ar * msx - ai * msy), f: mdy - (ai * msx + ar * msy) };
+}
+
+export function applyTransform(t, [x, y]) { return [t.a * x + t.c * y + t.e, t.b * x + t.d * y + t.f]; }
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+/** Decode YuNet outputs (cls_/obj_/bbox_/kps_ at strides 8,16,32) into detections in letterboxed pixels. */
+export function decodeYuNet(get, size, threshold) {
+  const dets = [];
+  for (const stride of [8, 16, 32]) {
+    const cls = get(`cls_${stride}`), obj = get(`obj_${stride}`), bbox = get(`bbox_${stride}`), kps = get(`kps_${stride}`);
+    if (!cls || !obj || !bbox || !kps) throw new ModelError('BAD_OUTPUTS', 'Unexpected face detector outputs.');
+    const cols = Math.floor(size / stride), rows = Math.floor(size / stride);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const score = Math.sqrt(clamp01(cls[i]) * clamp01(obj[i]));
+        if (!(score >= threshold)) continue;
+        const cx = (c + bbox[i * 4]) * stride, cy = (r + bbox[i * 4 + 1]) * stride;
+        const w = Math.exp(bbox[i * 4 + 2]) * stride, h = Math.exp(bbox[i * 4 + 3]) * stride;
+        const lm = [];
+        for (let n = 0; n < 5; n++) lm.push([(kps[i * 10 + 2 * n] + c) * stride, (kps[i * 10 + 2 * n + 1] + r) * stride]);
+        dets.push({ x: cx - w / 2, y: cy - h / 2, w, h, score, lm });
+      }
     }
-    // Dynamic script load if not present
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js";
-      s.onload = resolve;
-      s.onerror = () => reject(new Error("Failed to load ONNX Runtime Web"));
-      document.head.appendChild(s);
+  }
+  return dets;
+}
+
+export function nms(dets, iouThr) {
+  const sorted = [...dets].sort((p, q) => q.score - p.score), keep = [];
+  for (const d of sorted) {
+    let ok = true;
+    for (const k of keep) {
+      const ix = Math.max(0, Math.min(d.x + d.w, k.x + k.w) - Math.max(d.x, k.x));
+      const iy = Math.max(0, Math.min(d.y + d.h, k.y + k.h) - Math.max(d.y, k.y));
+      const inter = ix * iy, union = d.w * d.h + k.w * k.h - inter;
+      if (union > 0 && inter / union > iouThr) { ok = false; break; }
+    }
+    if (ok) keep.push(d);
+  }
+  return keep;
+}
+
+export function grayStats(rgba, w, h) {
+  const gray = new Float32Array(w * h);
+  let sum = 0;
+  for (let i = 0; i < w * h; i++) {
+    const g = 0.299 * rgba[4 * i] + 0.587 * rgba[4 * i + 1] + 0.114 * rgba[4 * i + 2];
+    gray[i] = g; sum += g;
+  }
+  const mean = sum / (w * h);
+  let v = 0;
+  for (let i = 0; i < gray.length; i++) v += (gray[i] - mean) ** 2;
+  const contrast = Math.sqrt(v / gray.length);
+  let lsum = 0, lsq = 0, cnt = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const l = gray[i - 1] + gray[i + 1] + gray[i - w] + gray[i + w] - 4 * gray[i];
+      lsum += l; lsq += l * l; cnt++;
+    }
+  }
+  const sharpness = lsq / cnt - (lsum / cnt) ** 2;
+  return { brightness: mean, contrast, sharpness };
+}
+
+/** >0: nose displaced toward image-right (subject turned to THEIR left); <0: toward image-left. */
+export function yawRatio(lm) {
+  const mid = (lm[0][0] + lm[1][0]) / 2, eye = Math.abs(lm[1][0] - lm[0][0]) || 1;
+  return (lm[2][0] - mid) / eye;
+}
+
+export function l2normalize(vec) {
+  let s = 0;
+  for (let i = 0; i < vec.length; i++) {
+    if (!Number.isFinite(vec[i])) throw new ModelError('BAD_EMBEDDING', 'The face model returned an invalid result.');
+    s += vec[i] * vec[i];
+  }
+  const n = Math.sqrt(s);
+  if (!(n > 0)) throw new ModelError('BAD_EMBEDDING', 'The face model returned an invalid result.');
+  return Array.from(vec, (v) => v / n);
+}
+
+/** Returns a user-facing message, or null when the face passes all checks for the requested pose. */
+export function judgeFace(face, vw, vh, stats, pose, cfg = ENGINE) {
+  const minDim = Math.min(vw, vh), margin = 0.01 * minDim;
+  if (face.w < cfg.minFaceFrac * minDim) return 'Move closer to the camera.';
+  if (face.w > cfg.maxFaceFrac * minDim) return 'Move back a little.';
+  if (face.x < -margin || face.y < -margin || face.x + face.w > vw + margin || face.y + face.h > vh + margin) {
+    return 'Keep your whole face inside the frame.';
+  }
+  const cx = face.x + face.w / 2, cy = face.y + face.h / 2;
+  if (cx < 0.2 * vw || cx > 0.8 * vw || cy < 0.15 * vh || cy > 0.85 * vh) return 'Center your face in the frame.';
+  const yaw = yawRatio(face.lm);
+  if (pose === 'front' && Math.abs(yaw) > cfg.frontMaxYaw) return 'Look straight at the camera.';
+  if (pose === 'any' && Math.abs(yaw) > 0.5) return 'Please face the camera.';
+  if (pose === 'left' || pose === 'right') {
+    const want = pose === 'left' ? 1 : -1;
+    const toward = yaw * want;
+    if (toward < cfg.sideMinYaw) return `Turn your face slightly to your ${pose}.`;
+    if (toward > cfg.sideMaxYaw) return 'Not so far: turn only slightly.';
+  }
+  if (stats.brightness < cfg.minBrightness) return 'Too dark. Move to a brighter place.';
+  if (stats.brightness > cfg.maxBrightness) return 'Too bright. Avoid strong light on your face.';
+  if (stats.contrast < cfg.minContrast) return 'Low contrast. Face the light source.';
+  if (stats.sharpness < cfg.minSharpness) return 'Image is blurry. Hold the camera steady.';
+  return null;
+}
+
+/* ---------- engine ---------- */
+
+async function fetchModel(url, onPct) {
+  let res;
+  try { res = await fetch(url); } catch { throw new ModelError('MODEL_FETCH', 'Could not download the face model.'); }
+  if (!res.ok) throw new ModelError('MODEL_MISSING', 'Face model file is missing on the server.');
+  const total = Number(res.headers.get('Content-Length')) || 0;
+  if (!res.body || !res.body.getReader) return new Uint8Array(await res.arrayBuffer());
+  const reader = res.body.getReader(), chunks = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value); got += value.length;
+    if (total && onPct) onPct(Math.round((got / total) * 100));
+  }
+  const out = new Uint8Array(got);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+
+async function makeSession(bytes) {
+  const attempts = ENGINE.useWebGPU && navigator.gpu ? [['webgpu', 'wasm'], ['wasm']] : [['wasm']];
+  let last;
+  for (const eps of attempts) {
+    try {
+      const session = await ort.InferenceSession.create(bytes, { executionProviders: eps, graphOptimizationLevel: 'all' });
+      return { session, providers: eps.join('+') };
+    } catch (e) { last = e; }
+  }
+  throw new ModelError('MODEL_LOAD', `The face model could not be loaded (${last && last.message ? last.message : 'unknown error'}).`);
+}
+
+export class FaceEngine {
+  constructor() {
+    this.det = null; this.rec = null; this.detSize = 0; this.backend = '';
+    this._queue = Promise.resolve();
+    this._detCanvas = document.createElement('canvas');
+    this._detCtx = this._detCanvas.getContext('2d', { willReadFrequently: true });
+    this._alignCanvas = document.createElement('canvas');
+    this._alignCanvas.width = this._alignCanvas.height = 112;
+    this._alignCtx = this._alignCanvas.getContext('2d', { willReadFrequently: true });
+  }
+
+  _enqueue(fn) {
+    const run = this._queue.then(fn, fn);
+    this._queue = run.catch(() => {});
+    return run;
+  }
+
+  async init(onProgress = () => {}) {
+    if (typeof ort === 'undefined') throw new ModelError('ORT_MISSING', 'The face engine library could not be loaded. Check your internet connection.');
+    ort.env.wasm.numThreads = 1;   // avoids needing cross-origin isolation (SharedArrayBuffer)
+    ort.env.wasm.proxy = false;
+    ort.env.wasm.wasmPaths = ENGINE.ortBase;   // explicit, so the .wasm files always come from the pinned version
+    onProgress(0, 'Loading face detector…');
+    const detBytes = await fetchModel(ENGINE.detectorUrl, (p) => onProgress(p, 'Loading face detector…'));
+    const d = await makeSession(detBytes);
+    this.det = d.session;
+    onProgress(0, 'Loading face recognition model (first load may take a minute)…');
+    const recBytes = await fetchModel(ENGINE.recognizerUrl, (p) => onProgress(p, 'Loading face recognition model (first load may take a minute)…'));
+    if (recBytes.length < 100000) throw new ModelError('MODEL_LOAD', 'The recognition model file is invalid (is it a Git LFS pointer?).');
+    const r = await makeSession(recBytes);
+    this.rec = r.session;
+    this.backend = `detector:${d.providers}, recognizer:${r.providers}`;
+    onProgress(100, 'Checking models…');
+    await this._pickDetSize();
+    const probe = await this._runRecognizer(new Float32Array(3 * 112 * 112));
+    if (probe.length !== ENGINE.embeddingDim) {
+      throw new ModelError('MODEL_LOAD', `Unexpected embedding size ${probe.length}; expected ${ENGINE.embeddingDim}.`);
+    }
+    console.info('Face engine ready:', this.backend, 'detector input', this.detSize);
+  }
+
+  async _pickDetSize() {
+    let last;
+    for (const s of ENGINE.detSizes) {
+      try { await this._runDetector(new Float32Array(3 * s * s), s); this.detSize = s; return; } catch (e) { last = e; }
+    }
+    throw new ModelError('MODEL_LOAD', `The face detector rejected all input sizes (${last && last.message}).`);
+  }
+
+  async _runDetector(chw, size) {
+    const input = new ort.Tensor('float32', chw, [1, 3, size, size]);
+    const out = await this.det.run({ [this.det.inputNames[0]]: input });
+    return decodeYuNet((n) => (out[n] ? out[n].data : null), size, ENGINE.detScore);
+  }
+
+  async _runRecognizer(chw) {
+    const input = new ort.Tensor('float32', chw, [1, 3, 112, 112]);
+    const out = await this.rec.run({ [this.rec.inputNames[0]]: input });
+    return out[this.rec.outputNames[0]].data;
+  }
+
+  /** Detect faces in a <video>; coordinates are in video pixels. */
+  detect(video) {
+    return this._enqueue(async () => {
+      const vw = video.videoWidth, vh = video.videoHeight, S = this.detSize;
+      if (!vw || !vh) return [];
+      const scale = Math.min(S / vw, S / vh);
+      this._detCanvas.width = this._detCanvas.height = S;
+      const ctx = this._detCtx;
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, S, S);
+      ctx.drawImage(video, 0, 0, vw * scale, vh * scale);
+      const { data } = ctx.getImageData(0, 0, S, S);
+      const plane = S * S, chw = new Float32Array(3 * plane);
+      for (let i = 0; i < plane; i++) { chw[i] = data[4 * i + 2]; chw[plane + i] = data[4 * i + 1]; chw[2 * plane + i] = data[4 * i]; } // BGR
+      const dets = nms(await this._runDetector(chw, S), ENGINE.nmsIou);
+      return dets.map((d) => ({ x: d.x / scale, y: d.y / scale, w: d.w / scale, h: d.h / scale, score: d.score,
+        lm: d.lm.map(([x, y]) => [x / scale, y / scale]) }));
     });
-    ort = window.ort;
-    // Prefer local wasm files from CDN
-    ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/";
-    ort.env.wasm.numThreads = 1; // safest default without COOP/COEP
   }
 
-  async function tryCreateSession(paths, providers) {
-    let lastErr = null;
-    for (const path of paths) {
-      try {
-        const session = await ort.InferenceSession.create(path, {
-          executionProviders: providers,
-        });
-        return { session, path };
-      } catch (e) {
-        lastErr = e;
-      }
-    }
-    throw lastErr || new Error("No model path succeeded");
+  _align(video, lm) {
+    const t = similarityTransform(lm, SFACE_TEMPLATE), ctx = this._alignCtx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, 112, 112);
+    ctx.setTransform(t.a, t.b, t.c, t.d, t.e, t.f);
+    ctx.drawImage(video, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return ctx.getImageData(0, 0, 112, 112).data;
   }
 
-  async function init() {
-    if (ready) return { ok: true };
-    if (loadError) return { ok: false, error: loadError };
-
-    try {
-      await loadOrt();
-      // Prefer WebGPU then WASM
-      const providers = [];
-      try {
-        if (navigator.gpu) providers.push("webgpu");
-      } catch (_) {}
-      providers.push("wasm");
-
-      // Detector is optional for simplified pipeline: if only recognizer is present
-      // we assume the caller already crops a roughly frontal face.
-      try {
-        const det = await tryCreateSession(MODEL_PATHS.detector, providers);
-        detSession = det.session;
-        console.info("[FaceEngine] Detector loaded:", det.path);
-      } catch (e) {
-        console.warn("[FaceEngine] Detector model not found — will use center-crop fallback.", e.message);
-        detSession = null;
-      }
-
-      const rec = await tryCreateSession(MODEL_PATHS.recognizer, providers);
-      recSession = rec.session;
-      console.info("[FaceEngine] Recognizer loaded:", rec.path);
-
-      ready = true;
-      return { ok: true };
-    } catch (e) {
-      loadError =
-        "Face recognition models are not available. " +
-        "Please place the required ONNX files in /static/models/ " +
-        "(see DEPLOYMENT.md). " +
-        (e && e.message ? e.message : "");
-      console.error("[FaceEngine]", loadError);
-      return { ok: false, error: loadError };
-    }
-  }
-
-  function isReady() {
-    return ready;
-  }
-
-  function getMeta() {
-    return { model_name: MODEL_NAME, model_version: MODEL_VERSION, embedding_dim: EMBEDDING_DIM };
-  }
-
-  /**
-   * Very lightweight face presence heuristic when no detector model is present:
-   * assumes a single centered face in the frame (common for guided capture UI).
-   */
-  function fallbackDetect(imageData) {
-    const { width, height } = imageData;
-    // Assume face occupies central ~60% region
-    const size = Math.min(width, height) * 0.62;
-    const x = (width - size) / 2;
-    const y = (height - size) / 2 - size * 0.05;
-    return [{ box: { x, y, w: size, h: size }, score: 0.9 }];
-  }
-
-  /**
-   * Minimal UltraFace / SCRFD-style postprocess is complex; when a detector session
-   * exists we run a simplified path that expects a common RFB-320 style output.
-   * If parsing fails we fall back to center crop so registration still works.
-   */
-  async function detectFaces(imageData) {
-    if (!detSession) {
-      return fallbackDetect(imageData);
-    }
-    try {
-      const inputName = detSession.inputNames[0];
-      // UltraFace RFB-320 typically expects 320x240 or 640x480; use 320x240
-      const tw = 320;
-      const th = 240;
-      const tensor = imageDataToTensor(imageData, tw, th, "bgr_mean");
-      const feeds = {};
-      feeds[inputName] = tensor;
-      const out = await detSession.run(feeds);
-      // Best-effort: if outputs look like scores+boxes, parse top face; else fallback
-      const faces = parseDetectorOutput(out, imageData.width, imageData.height, tw, th);
-      if (faces.length === 0) return fallbackDetect(imageData);
-      return faces;
-    } catch (e) {
-      console.warn("[FaceEngine] Detector run failed, using center crop.", e);
-      return fallbackDetect(imageData);
-    }
-  }
-
-  function parseDetectorOutput(outputs, origW, origH, tw, th) {
-    // Generic fallback: many ultraface models output "scores" and "boxes"
-    const keys = Object.keys(outputs);
-    let scores = null;
-    let boxes = null;
-    for (const k of keys) {
-      const t = outputs[k];
-      if (!t || !t.data) continue;
-      if (k.toLowerCase().includes("score") || (t.dims && t.dims[t.dims.length - 1] === 2)) {
-        scores = t;
-      }
-      if (k.toLowerCase().includes("box") || (t.dims && t.dims[t.dims.length - 1] === 4)) {
-        boxes = t;
-      }
-    }
-    if (!scores || !boxes) return [];
-    const sData = scores.data;
-    const bData = boxes.data;
-    const n = Math.min(Math.floor(sData.length / 2), Math.floor(bData.length / 4));
-    let bestIdx = -1;
-    let bestScore = 0.6;
-    for (let i = 0; i < n; i++) {
-      const conf = sData[i * 2 + 1]; // face class
-      if (conf > bestScore) {
-        bestScore = conf;
-        bestIdx = i;
-      }
-    }
-    if (bestIdx < 0) return [];
-    const bx = bData[bestIdx * 4 + 0] * origW;
-    const by = bData[bestIdx * 4 + 1] * origH;
-    const bw = (bData[bestIdx * 4 + 2] - bData[bestIdx * 4 + 0]) * origW;
-    const bh = (bData[bestIdx * 4 + 3] - bData[bestIdx * 4 + 1]) * origH;
-    return [{ box: { x: bx, y: by, w: bw, h: bh }, score: bestScore }];
-  }
-
-  function imageDataToTensor(imageData, tw, th, mode) {
-    // Resize + convert to CHW float32
-    const src = imageData;
-    const canvas = document.createElement("canvas");
-    canvas.width = tw;
-    canvas.height = th;
-    const ctx = canvas.getContext("2d");
-    // Draw source ImageData via temporary canvas
-    const tmp = document.createElement("canvas");
-    tmp.width = src.width;
-    tmp.height = src.height;
-    tmp.getContext("2d").putImageData(src, 0, 0);
-    ctx.drawImage(tmp, 0, 0, tw, th);
-    const resized = ctx.getImageData(0, 0, tw, th);
-    const data = resized.data;
-    const float = new Float32Array(3 * tw * th);
-    const mean = mode === "bgr_mean" ? [104, 117, 123] : [127.5, 127.5, 127.5];
-    const scale = mode === "bgr_mean" ? 1.0 : 127.5;
-    let p = 0;
-    for (let y = 0; y < th; y++) {
-      for (let x = 0; x < tw; x++) {
-        const i = (y * tw + x) * 4;
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
-        if (mode === "bgr_mean") {
-          // BGR order, mean subtract, no /255
-          float[0 * tw * th + p] = b - mean[0];
-          float[1 * tw * th + p] = g - mean[1];
-          float[2 * tw * th + p] = r - mean[2];
-        } else {
-          // RGB, (x-127.5)/127.5
-          float[0 * tw * th + p] = (r - mean[0]) / scale;
-          float[1 * tw * th + p] = (g - mean[1]) / scale;
-          float[2 * tw * th + p] = (b - mean[2]) / scale;
-        }
-        p++;
-      }
-    }
-    return new ort.Tensor("float32", float, [1, 3, th, tw]);
-  }
-
-  function cropFace(imageData, box, margin = 0.2) {
-    const { width, height } = imageData;
-    let { x, y, w, h } = box;
-    // Expand
-    const mx = w * margin;
-    const my = h * margin;
-    x = Math.max(0, x - mx);
-    y = Math.max(0, y - my);
-    w = Math.min(width - x, w + 2 * mx);
-    h = Math.min(height - y, h + 2 * my);
-    // Make square
-    const side = Math.max(w, h);
-    const cx = x + w / 2;
-    const cy = y + h / 2;
-    x = Math.max(0, cx - side / 2);
-    y = Math.max(0, cy - side / 2);
-    const sw = Math.min(side, width - x);
-    const sh = Math.min(side, height - y);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = INPUT_SIZE;
-    canvas.height = INPUT_SIZE;
-    const ctx = canvas.getContext("2d");
-    const tmp = document.createElement("canvas");
-    tmp.width = width;
-    tmp.height = height;
-    tmp.getContext("2d").putImageData(imageData, 0, 0);
-    ctx.drawImage(tmp, x, y, sw, sh, 0, 0, INPUT_SIZE, INPUT_SIZE);
-    return ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
-  }
-
-  function l2Normalize(arr) {
-    let sum = 0;
-    for (let i = 0; i < arr.length; i++) sum += arr[i] * arr[i];
-    const n = Math.sqrt(sum) || 1;
-    const out = new Array(arr.length);
-    for (let i = 0; i < arr.length; i++) out[i] = arr[i] / n;
-    return out;
-  }
-
-  /**
-   * Quality heuristics (no ML): reject obviously bad frames.
-   */
-  function assessQuality(imageData, faceBox) {
-    const { width, height, data } = imageData;
-    // Brightness
-    let sum = 0;
-    const step = 16;
-    let count = 0;
-    for (let i = 0; i < data.length; i += 4 * step) {
-      sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-      count++;
-    }
-    const brightness = sum / count;
-    if (brightness < 35) return { ok: false, reason: "Face is too dark. Improve lighting." };
-    if (brightness > 230) return { ok: false, reason: "Face is too bright / overexposed." };
-
-    // Size relative to frame
-    if (faceBox) {
-      const area = (faceBox.w * faceBox.h) / (width * height);
-      if (area < 0.04) return { ok: false, reason: "Face is too small. Move closer." };
-      if (area > 0.75) return { ok: false, reason: "Face is too close. Move back a little." };
-    }
-    return { ok: true };
-  }
-
-  async function getEmbedding(imageData) {
-    if (!ready) {
-      const r = await init();
-      if (!r.ok) throw new Error(r.error);
-    }
-
-    const faces = await detectFaces(imageData);
-    if (faces.length === 0) {
-      return { ok: false, error: "No face detected. Please try again.", faces: 0 };
-    }
-    if (faces.length > 1) {
-      // Keep only the highest-scoring face but still warn if multiple strong detections
-      faces.sort((a, b) => b.score - a.score);
-    }
-    // For strict single-face UX the caller may still reject multiple
-
+  /** -> {ok, count, message, face?}. pose: 'front' | 'left' | 'right' | 'any'. */
+  async analyze(video, pose = 'any') {
+    const faces = await this.detect(video);
+    if (faces.length === 0) return { ok: false, count: 0, message: 'No face detected. Please try again.' };
+    if (faces.length > 1) return { ok: false, count: faces.length, message: 'Please make sure only one person is in the camera.' };
     const face = faces[0];
-    const quality = assessQuality(imageData, face.box);
-    if (!quality.ok) {
-      return { ok: false, error: quality.reason, faces: faces.length };
-    }
-
-    const cropped = cropFace(imageData, face.box);
-    const inputName = recSession.inputNames[0];
-    const tensor = imageDataToTensor(cropped, INPUT_SIZE, INPUT_SIZE, "rgb_norm");
-    const feeds = {};
-    feeds[inputName] = tensor;
-    const out = await recSession.run(feeds);
-    const outName = recSession.outputNames[0];
-    const embData = out[outName].data;
-    const emb = l2Normalize(Array.from(embData));
-
-    if (emb.length !== EMBEDDING_DIM) {
-      // Some models output 128; still accept but warn server may reject
-      console.warn("[FaceEngine] Unexpected embedding dim:", emb.length);
-    }
-
-    return {
-      ok: true,
-      embedding: emb,
-      faces: faces.length,
-      score: face.score,
-      meta: getMeta(),
-    };
+    const stats = grayStats(this._align(video, face.lm), 112, 112);
+    const message = judgeFace(face, video.videoWidth, video.videoHeight, stats, pose);
+    return message ? { ok: false, count: 1, message } : { ok: true, count: 1, face };
   }
 
-  return {
-    init,
-    isReady,
-    getMeta,
-    detectFaces,
-    getEmbedding,
-    assessQuality,
-    MODEL_NAME,
-    MODEL_VERSION,
-    EMBEDDING_DIM,
-  };
-})();
+  /** Embedding (unit-length array of 128 numbers) for a face found by analyze(). */
+  embed(video, face) {
+    return this._enqueue(async () => {
+      const px = this._align(video, face.lm), plane = 112 * 112, chw = new Float32Array(3 * plane);
+      for (let i = 0; i < plane; i++) { chw[i] = px[4 * i]; chw[plane + i] = px[4 * i + 1]; chw[2 * plane + i] = px[4 * i + 2]; } // RGB
+      const raw = await this._runRecognizer(chw);
+      if (raw.length !== ENGINE.embeddingDim) throw new ModelError('BAD_EMBEDDING', 'The face model returned an unexpected result.');
+      return l2normalize(raw);
+    });
+  }
+}
 
-window.FaceEngine = FaceEngine;
+/* ---------- shared capture-flow plumbing ---------- */
+
+export function startLiveCheck(video, engine, getPose, onResult) {
+  let stopped = false;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  (async () => {
+    while (!stopped) {
+      try {
+        const r = await engine.analyze(video, getPose());
+        if (!stopped) onResult(r);
+      } catch (e) {
+        console.error(e);
+        if (!stopped) onResult({ ok: false, message: 'Face check failed. Please reload the page.' });
+        await sleep(1000);
+      }
+      await sleep(150);
+    }
+  })();
+  return () => { stopped = true; };
+}
+
+export class CaptureFlow {
+  constructor({ els, camera, engine, ui, modelInfo }) {
+    Object.assign(this, { els, camera, engine, ui, modelInfo });
+    this._cancelled = false; this._onCapture = null; this._onCancel = null;
+  }
+  waitForCapture() {
+    if (this._cancelled) return Promise.reject(new Cancelled());
+    return new Promise((resolve, reject) => { this._onCapture = resolve; this._onCancel = reject; });
+  }
+  capture() { const f = this._onCapture; this._onCapture = null; if (f) f(); }
+  cancel() { this._cancelled = true; if (this._onCancel) this._onCancel(new Cancelled()); }
+  assertActive() { if (this._cancelled) throw new Cancelled(); }
+  liveHint(r) { this.ui.hint(r.ok ? 'Looks good. Press Capture.' : r.message, r.ok); }
+}

@@ -1,41 +1,12 @@
-# Environment & secrets
 .env
-.env.local
-*.pem
-
-# Python
+.env.*
+!.env.example
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
+*.pyc
 .venv/
-env/
-ENV/
-*.egg-info/
-dist/
-build/
-
-# IDE / OS
-.idea/
-.vscode/
-*.swp
-.DS_Store
-Thumbs.db
-
-# Local model caches / large binaries (download separately)
-static/models/*.onnx
-static/models/*.ort
-!static/models/.gitkeep
-
-# Logs & test artifacts
-*.log
-.coverage
-htmlcov/
+venv/
 .pytest_cache/
-.mypy_cache/
-
-# Local data dumps
-*.json.bak
-data/
+*.zip
+# Model files are large; see static/models/README.md. Remove these two lines
+# only if you have verified redistribution rights and want to commit them.
+static/models/*.onnx

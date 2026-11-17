@@ -1,114 +1,74 @@
-"""
-MongoDB Atlas connection and collection helpers.
-"""
+"""MongoDB access. pymongo is imported lazily so the rest of the app (and the
+unit tests) work without it installed."""
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
 
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
-from bson import ObjectId
-
-from config import Config
-
-_client: Optional[MongoClient] = None
-_db = None
-_collection = None
+import numpy as np
 
 
-def get_client() -> MongoClient:
-    global _client
-    if _client is None:
-        _client = MongoClient(
-            Config.MONGODB_URI,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=10000,
-        )
-    return _client
+class RepositoryError(Exception):
+    """Any database failure. Message is safe to log, never shown to visitors."""
 
 
-def get_db():
-    global _db
-    if _db is None:
-        client = get_client()
-        _db = client[Config.MONGODB_DB]
-    return _db
-
-
-def get_collection():
-    global _collection
-    if _collection is None:
-        db = get_db()
-        _collection = db[Config.MONGODB_COLLECTION]
-        # Ensure useful indexes (idempotent)
+class MongoRepository:
+    def __init__(self, uri, db_name, collection, retention_days):
+        if not uri:
+            raise RepositoryError("MONGODB_URI is not set")
         try:
-            _collection.create_index([("name", ASCENDING)])
-            _collection.create_index([("created_at", ASCENDING)])
-            _collection.create_index([("model_name", ASCENDING), ("model_version", ASCENDING)])
-        except Exception:
-            # Index creation may fail on free-tier limits or permissions; non-fatal
-            pass
-    return _collection
+            import pymongo
+            from pymongo.errors import PyMongoError
+        except ImportError as exc:  # pragma: no cover
+            raise RepositoryError("pymongo is not installed") from exc
+        self._err = PyMongoError
+        try:
+            self._client = pymongo.MongoClient(
+                uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000,
+                socketTimeoutMS=10000, tz_aware=True, appname="face-recognition")
+            self._db = self._client[db_name]
+            self._coll = self._db[collection]
+            self._coll_name = collection
+            self._client.admin.command("ping")
+            self._ensure_indexes(retention_days)
+        except PyMongoError as exc:
+            raise RepositoryError(f"connection failed: {type(exc).__name__}") from exc
 
+    def _ensure_indexes(self, retention_days):
+        from pymongo.errors import OperationFailure
+        ttl = int(retention_days) * 86400
+        self._coll.create_index([("model_name", 1), ("model_version", 1)], name="model_idx")
+        try:
+            self._coll.create_index([("created_at", 1)], name="created_at_ttl", expireAfterSeconds=ttl)
+        except OperationFailure:
+            # TTL value changed since the index was created: update it in place.
+            self._db.command("collMod", self._coll_name,
+                             index={"name": "created_at_ttl", "expireAfterSeconds": ttl})
 
-def check_connection() -> bool:
-    """Return True if MongoDB is reachable."""
-    try:
-        client = get_client()
-        client.admin.command("ping")
-        return True
-    except (ConnectionFailure, ServerSelectionTimeoutError, Exception):
-        return False
+    def ping(self):
+        try:
+            self._client.admin.command("ping")
+        except self._err as exc:
+            raise RepositoryError(f"ping failed: {type(exc).__name__}") from exc
 
+    def count(self):
+        try:
+            return self._coll.estimated_document_count()
+        except self._err as exc:
+            raise RepositoryError(type(exc).__name__) from exc
 
-def insert_face(document: Dict[str, Any]) -> str:
-    """Insert a registered face document. Returns inserted_id as string."""
-    col = get_collection()
-    result = col.insert_one(document)
-    return str(result.inserted_id)
+    def load_embeddings(self, model_name, model_version):
+        try:
+            cur = self._coll.find({"model_name": model_name, "model_version": model_version},
+                                  {"name": 1, "embeddings": 1})
+            return [{"id": str(d["_id"]), "name": d["name"],
+                     "embeddings": np.asarray(d["embeddings"], dtype=np.float64)} for d in cur]
+        except self._err as exc:
+            raise RepositoryError(type(exc).__name__) from exc
 
-
-def find_all_faces(model_name: Optional[str] = None, model_version: Optional[str] = None) -> List[Dict]:
-    """Return all registered faces, optionally filtered by model."""
-    col = get_collection()
-    query: Dict[str, Any] = {}
-    if model_name:
-        query["model_name"] = model_name
-    if model_version:
-        query["model_version"] = model_version
-    cursor = col.find(query)
-    results = []
-    for doc in cursor:
-        doc["_id"] = str(doc["_id"])
-        results.append(doc)
-    return results
-
-
-def find_by_id(face_id: str) -> Optional[Dict]:
-    col = get_collection()
-    try:
-        doc = col.find_one({"_id": ObjectId(face_id)})
-        if doc:
-            doc["_id"] = str(doc["_id"])
-        return doc
-    except Exception:
-        return None
-
-
-def delete_by_id(face_id: str) -> bool:
-    """Owner-operated deletion helper. Returns True if a document was deleted."""
-    col = get_collection()
-    try:
-        result = col.delete_one({"_id": ObjectId(face_id)})
-        return result.deleted_count > 0
-    except Exception:
-        return False
-
-
-def count_faces() -> int:
-    col = get_collection()
-    return col.count_documents({})
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    def insert(self, name, embeddings, model_name, model_version):
+        doc = {"name": name, "embeddings": [[float(x) for x in e] for e in embeddings],
+               "embedding_dim": int(len(embeddings[0])), "sample_count": len(embeddings),
+               "model_name": model_name, "model_version": model_version,
+               "created_at": datetime.now(timezone.utc)}
+        try:
+            return str(self._coll.insert_one(doc).inserted_id)
+        except self._err as exc:
+            raise RepositoryError(type(exc).__name__) from exc
