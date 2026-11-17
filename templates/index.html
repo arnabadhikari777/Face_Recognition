@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f1419" />
+  <title>Face Recognition</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Face Recognition</h1>
+      <p>Register or recognize a face — processing happens on your device</p>
+    </header>
+
+    <div id="statusBox" class="status-box hidden"></div>
+
+    <div id="mainButtons" class="btn-row">
+      <button class="btn" id="btnRegister" type="button">Register Face</button>
+      <button class="btn btn-secondary" id="btnRecognize" type="button">Recognize Face</button>
+    </div>
+
+    <!-- Register panel -->
+    <section id="registerPanel" class="card hidden">
+      <label for="nameInput">Name</label>
+      <input type="text" id="nameInput" placeholder="Person's name" maxlength="100" autocomplete="off" />
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="consentRegister" />
+        <label for="consentRegister">
+          I confirm that the person whose face is being registered has given informed consent.
+        </label>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn" id="startRegCameraBtn" type="button">Start Camera</button>
+        <button class="btn btn-secondary" id="cancelRegBtn" type="button">Cancel</button>
+      </div>
+
+      <div class="progress-steps" aria-hidden="true">
+        <div class="step"></div>
+        <div class="step"></div>
+        <div class="step"></div>
+      </div>
+      <div id="stepLabel" class="step-label"></div>
+    </section>
+
+    <!-- Recognize panel -->
+    <section id="recognizePanel" class="card hidden">
+      <div class="checkbox-row">
+        <input type="checkbox" id="consentRecognize" />
+        <label for="consentRecognize">
+          I confirm that I have permission to capture and check this person's face.
+        </label>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="startRecCameraBtn" type="button">Start Camera</button>
+        <button class="btn btn-secondary" id="cancelRecBtn" type="button">Cancel</button>
+      </div>
+    </section>
+
+    <!-- Shared camera section -->
+    <section id="cameraSection" class="hidden">
+      <div class="camera-wrap">
+        <video id="video" playsinline muted autoplay></video>
+        <canvas id="overlayCanvas"></canvas>
+        <div class="guide-overlay">
+          <div class="guide-oval"></div>
+        </div>
+      </div>
+      <canvas id="captureCanvas" class="hidden"></canvas>
+
+      <div class="camera-controls">
+        <button class="btn btn-secondary" id="switchCamBtn" type="button">Switch Camera</button>
+        <button class="btn btn-success hidden" id="captureBtn" type="button">Capture Sample</button>
+        <button class="btn btn-success hidden" id="recognizeCaptureBtn" type="button">Recognize</button>
+        <button class="btn btn-danger" id="stopCamBtn" type="button">Stop</button>
+      </div>
+    </section>
+
+    <button class="btn btn-secondary hidden" id="doneRegisterBtn" type="button" style="width:100%;margin-top:0.5rem">
+      Done
+    </button>
+  </div>
+
+  <footer>
+    Face detection &amp; embedding run in your browser. Only embeddings are sent to the server.
+  </footer>
+
+  <script src="/static/js/camera.js"></script>
+  <script src="/static/js/face-engine.js"></script>
+  <script src="/static/js/registration.js"></script>
+  <script src="/static/js/recognition.js"></script>
+  <script>
+    document.getElementById("btnRegister").addEventListener("click", () => Registration.start());
+    document.getElementById("btnRecognize").addEventListener("click", () => Recognition.start());
+    document.getElementById("startRegCameraBtn").addEventListener("click", () => Registration.startCamera());
+    document.getElementById("cancelRegBtn").addEventListener("click", () => Registration.cancel());
+    document.getElementById("captureBtn").addEventListener("click", () => Registration.captureSample());
+    document.getElementById("doneRegisterBtn").addEventListener("click", () => {
+      document.getElementById("doneRegisterBtn").classList.add("hidden");
+      Registration.resetUI();
+    });
+
+    document.getElementById("startRecCameraBtn").addEventListener("click", () => Recognition.startCamera());
+    document.getElementById("cancelRecBtn").addEventListener("click", () => Recognition.cancel());
+    document.getElementById("recognizeCaptureBtn").addEventListener("click", () => Recognition.captureAndRecognize());
+
+    document.getElementById("switchCamBtn").addEventListener("click", async () => {
+      const video = document.getElementById("video");
+      await Camera.switchCamera(video);
+    });
+    document.getElementById("stopCamBtn").addEventListener("click", () => {
+      Camera.stop();
+      document.getElementById("cameraSection").classList.add("hidden");
+      // Leave panels open so user can restart camera
+    });
+
+    // Show correct capture button depending on mode
+    const obs = new MutationObserver(() => {
+      const reg = !document.getElementById("registerPanel").classList.contains("hidden");
+      const rec = !document.getElementById("recognizePanel").classList.contains("hidden");
+      document.getElementById("captureBtn").classList.toggle("hidden", !reg);
+      document.getElementById("recognizeCaptureBtn").classList.toggle("hidden", !rec);
+    });
+    obs.observe(document.getElementById("registerPanel"), { attributes: true });
+    obs.observe(document.getElementById("recognizePanel"), { attributes: true });
+  </script>
+</body>
+</html>
