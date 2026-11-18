@@ -1,0 +1,160 @@
+{
+  "manifest_version": 1,
+  "description": "Single source of truth for every AI model: download script, Flask API and browser engine all read this file. Do not hardcode model URLs anywhere else.",
+  "default_profile": "accuracy",
+  "archives": [
+    {
+      "id": "insightface_buffalo_s",
+      "url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip",
+      "filename": "buffalo_s.zip",
+      "sha256": "d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e",
+      "size_bytes": 127607557
+    },
+    {
+      "id": "insightface_buffalo_l",
+      "url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+      "filename": "buffalo_l.zip",
+      "sha256": "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
+      "size_bytes": 288621354
+    }
+  ],
+  "models": [
+    {
+      "id": "scrfd_500m",
+      "name": "SCRFD 500M (InsightFace buffalo_s det_500m)",
+      "category": "detector",
+      "role": "primary_detector",
+      "version": "buffalo_s-v0.7",
+      "source": { "type": "archive", "archive_id": "insightface_buffalo_s", "member": "det_500m.onnx" },
+      "filename": "det_500m.onnx",
+      "sha256": "5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a",
+      "size_bytes": 2524817,
+      "input": { "name": "input.1", "shape": [1, 3, "H", "W"], "layout": "NCHW", "dtype": "float32", "color": "RGB", "normalize": "(x-127.5)/128", "note": "H and W dynamic, multiples of 32; the browser uses 640x640 letterboxed top-left" },
+      "output": { "count": 9, "description": "scores/bbox/kps for strides 8,16,32, 2 anchors per cell; 5 landmarks" },
+      "embedding_dim": null,
+      "license": { "name": "InsightFace pretrained models - non-commercial research only", "class": "noncommercial", "url": "https://github.com/deepinsight/insightface#license" },
+      "required": true
+    },
+    {
+      "id": "yunet_2023mar",
+      "name": "YuNet 2023mar (OpenCV Zoo)",
+      "category": "detector",
+      "role": "fallback_detector",
+      "version": "2023mar",
+      "source": { "type": "url", "url": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx" },
+      "filename": "face_detection_yunet_2023mar.onnx",
+      "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+      "size_bytes": 232589,
+      "input": { "name": "input", "shape": [1, 3, 640, 640], "layout": "NCHW", "dtype": "float32", "color": "BGR", "normalize": "none (raw 0..255)", "note": "fixed 640x640" },
+      "output": { "count": 12, "description": "cls_/obj_/bbox_/kps_ for strides 8,16,32; 5 landmarks" },
+      "embedding_dim": null,
+      "license": { "name": "MIT (OpenCV Zoo, YuNet)", "class": "permissive", "url": "https://github.com/opencv/opencv_zoo/blob/main/models/face_detection_yunet/LICENSE" },
+      "required": true
+    },
+    {
+      "id": "w600k_mbf",
+      "name": "MobileFaceNet / ArcFace, WebFace600K (InsightFace buffalo_s)",
+      "category": "recognition",
+      "role": "primary_recognizer",
+      "version": "buffalo_s-v0.7",
+      "source": { "type": "archive", "archive_id": "insightface_buffalo_s", "member": "w600k_mbf.onnx" },
+      "filename": "w600k_mbf.onnx",
+      "sha256": "9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f",
+      "size_bytes": 13616099,
+      "input": { "name": "input.1", "shape": ["N", 3, 112, 112], "layout": "NCHW", "dtype": "float32", "color": "RGB", "normalize": "(x-127.5)/127.5" },
+      "output": { "name": "516", "shape": [1, 512], "description": "face embedding, must be L2-normalised" },
+      "embedding_dim": 512,
+      "license": { "name": "InsightFace pretrained models - non-commercial research only", "class": "noncommercial", "url": "https://github.com/deepinsight/insightface#license" },
+      "required": true
+    },
+    {
+      "id": "w600k_r50",
+      "name": "IResNet-50 / ArcFace, WebFace600K (InsightFace buffalo_l)",
+      "category": "recognition",
+      "role": "secondary_recognizer",
+      "version": "buffalo_l-v0.7",
+      "source": { "type": "archive", "archive_id": "insightface_buffalo_l", "member": "w600k_r50.onnx" },
+      "filename": "w600k_r50.onnx",
+      "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+      "size_bytes": 174383860,
+      "input": { "name": "input.1", "shape": ["N", 3, 112, 112], "layout": "NCHW", "dtype": "float32", "color": "RGB", "normalize": "(x-127.5)/127.5" },
+      "output": { "name": "683", "shape": [1, 512], "description": "face embedding, must be L2-normalised" },
+      "embedding_dim": 512,
+      "license": { "name": "InsightFace pretrained models - non-commercial research only", "class": "noncommercial", "url": "https://github.com/deepinsight/insightface#license" },
+      "required": true
+    }
+  ],
+  "profiles": {
+    "accuracy": {
+      "label": "Accuracy Mode",
+      "detectors": ["scrfd_500m", "yunet_2023mar"],
+      "recognizers": ["w600k_mbf", "w600k_r50"],
+      "always_run_all_recognizers": true,
+      "deep_landmark_check": true,
+      "capture_max_side": 1280,
+      "preview_max_side": 640,
+      "backends": ["webgpu", "wasm"]
+    },
+    "balanced": {
+      "label": "Balanced Mode",
+      "detectors": ["scrfd_500m", "yunet_2023mar"],
+      "recognizers": ["w600k_mbf", "w600k_r50"],
+      "always_run_all_recognizers": false,
+      "deep_landmark_check": false,
+      "capture_max_side": 960,
+      "preview_max_side": 480,
+      "backends": ["webgpu", "wasm"]
+    },
+    "compatibility": {
+      "label": "Compatibility Mode",
+      "detectors": ["yunet_2023mar"],
+      "recognizers": ["w600k_mbf"],
+      "always_run_all_recognizers": false,
+      "deep_landmark_check": false,
+      "capture_max_side": 720,
+      "preview_max_side": 480,
+      "backends": ["wasm"]
+    }
+  },
+  "detection": { "score_threshold": 0.5, "fallback_below_score": 0.6 },
+  "quality": {
+    "calibrated": false,
+    "note": "Provisional engineering defaults. Calibrate with tools/benchmark.py on real images from your own devices.",
+    "min_detection_score": 0.6,
+    "min_face_frac": 0.18,
+    "max_face_frac": 0.85,
+    "min_eye_distance_px": 50,
+    "min_brightness": 60,
+    "max_brightness": 200,
+    "min_contrast": 25,
+    "max_clip_frac": 0.25,
+    "min_sharpness": 40,
+    "max_motion_blur": 1.6,
+    "max_motion_frac": 0.04,
+    "min_landmark_agreement": 0.85,
+    "max_roll_deg": 20,
+    "front_max_yaw": 0.15,
+    "front_max_pitch": 0.08,
+    "any_max_yaw": 0.5,
+    "side_min_yaw": 0.2,
+    "side_max_yaw": 0.7,
+    "vertical_min_pitch": 0.08,
+    "min_frame_quality": 0.35
+  },
+  "registration": {
+    "plan": [
+      { "pose": "front", "count": 3, "optional": false, "text": "Look straight at the camera." },
+      { "pose": "left", "count": 2, "optional": false, "text": "Slowly turn your face slightly to your left." },
+      { "pose": "right", "count": 2, "optional": false, "text": "Now turn your face slightly to your right." },
+      { "pose": "up", "count": 1, "optional": true, "text": "Tilt your chin slightly up." },
+      { "pose": "down", "count": 1, "optional": true, "text": "Tilt your chin slightly down." }
+    ],
+    "min_templates": 6,
+    "max_templates": 10,
+    "burst_frames": 5,
+    "burst_timeout_ms": 7000,
+    "duplicate_similarity": 0.97,
+    "outlier_mad_k": 3.0
+  },
+  "recognition": { "burst_frames": 5, "min_frames": 3, "burst_timeout_ms": 7000 }
+}

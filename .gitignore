@@ -1,12 +1,12 @@
 .env
-.env.*
-!.env.example
 __pycache__/
 *.pyc
 .venv/
 venv/
-.pytest_cache/
-*.zip
-# Model files are large; see static/models/README.md. Remove these two lines
-# only if you have verified redistribution rights and want to commit them.
+node_modules/
+# models are downloaded by scripts/download_models.sh during the Render build - never commit them
 static/models/*.onnx
+static/models/*.part
+benchmark_out/
+dataset/
+.pytest_cache/

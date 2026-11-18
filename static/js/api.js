@@ -1,8 +1,7 @@
 /** Backend communication. Never throws for HTTP errors; returns {ok,status,data}. */
 async function request(path, options = {}) {
   const ctrl = new AbortController();
-  // Render Free can take ~50 s to wake from sleep, so allow a long timeout.
-  const timer = setTimeout(() => ctrl.abort(), 70000);
+  const timer = setTimeout(() => ctrl.abort(), 70000);     // Render Free can need ~50 s to wake up
   try {
     const res = await fetch(path, { ...options, signal: ctrl.signal });
     let data = null;
@@ -16,9 +15,15 @@ async function request(path, options = {}) {
   } finally { clearTimeout(timer); }
 }
 
-const post = (path, body) => request(path, {
-  method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const post = (path, body) => request(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
 export const getConfig = () => request('/api/config');
 export const registerFace = (payload) => post('/api/register-face', payload);
 export const recognizeFace = (payload) => post('/api/recognize-face', payload);
+
+/** {model_id: {version, vector}} for the models in `vectors` (model_id -> unit array). */
+export function packEmbeddings(vectors, config) {
+  const out = {};
+  for (const [id, vec] of Object.entries(vectors)) out[id] = { version: config.models.find((m) => m.id === id).version, vector: vec };
+  return out;
+}

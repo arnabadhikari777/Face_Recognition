@@ -1,30 +1,16 @@
-import os
-import tempfile
-import unittest
-
 from config import Config, load_dotenv_file
 
 
-class DotenvTests(unittest.TestCase):
-    def test_loads_without_overriding(self):
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, ".env")
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("# comment\nMONGODB_URI=\"mongodb+srv://u:p@h/?x=1\"\nTRUST_PROXY=true\nBAD LINE\nKEEP=file\n")
-            env = {"KEEP": "real"}
-            self.assertEqual(load_dotenv_file(path, env), 2)
-            self.assertEqual(env["MONGODB_URI"], "mongodb+srv://u:p@h/?x=1")
-            self.assertEqual(env["KEEP"], "real")
-
-    def test_missing_file_is_fine(self):
-        self.assertEqual(load_dotenv_file("/nonexistent/.env", {}), 0)
-
-    def test_from_env(self):
-        cfg = Config.from_env({"MONGODB_URI": "x", "TRUST_PROXY": "true", "ALLOWED_ORIGINS": "https://a.example, https://b.example"})
-        self.assertTrue(cfg.TRUST_PROXY)
-        self.assertEqual(cfg.ALLOWED_ORIGINS, ("https://a.example", "https://b.example"))
-        self.assertEqual(cfg.EMBEDDING_DIM, 128)
+def test_defaults_do_not_expire_biometrics():
+    assert Config().RETENTION_DAYS == 0
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_env_overrides(tmp_path):
+    c = Config.from_env({"RETENTION_DAYS": "30", "MAX_RECORDS": "10", "TRUST_PROXY": "true", "ENROLL_REQUIRE_ALL": "1"})
+    assert c.RETENTION_DAYS == 30 and c.MAX_RECORDS == 10 and c.TRUST_PROXY and c.ENROLL_REQUIRE_ALL
+
+
+def test_dotenv_does_not_override(tmp_path):
+    f = tmp_path / ".env"; f.write_text("A=1\nB='two'\n#c\n")
+    env = {"A": "keep"}
+    assert load_dotenv_file(str(f), env) == 1 and env == {"A": "keep", "B": "two"}

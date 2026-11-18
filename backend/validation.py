@@ -4,6 +4,8 @@ import re
 
 import numpy as np
 
+from .manifest import POSES
+
 
 class ApiError(Exception):
     def __init__(self, status, code, message, headers=None):
@@ -13,6 +15,7 @@ class ApiError(Exception):
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 NAME_MAX = 60
+MAX_SAMPLES = 16
 
 
 def validate_name(name):
@@ -33,49 +36,82 @@ def validate_consent(data):
         raise ApiError(400, "consent_required", "Informed consent must be confirmed.")
 
 
-def validate_model(data, cfg):
-    if data.get("model_name") != cfg.MODEL_NAME or data.get("model_version") != cfg.MODEL_VERSION:
-        raise ApiError(409, "model_mismatch",
-                       "The face model on this device does not match the server. Please reload the page.")
-
-
-def validate_embedding(emb, dim):
-    """Return a unit-length float64 vector or raise ApiError."""
-    if not isinstance(emb, list) or len(emb) != dim:
+def validate_vector(vec, dim):
+    if not isinstance(vec, list) or len(vec) != dim:
         raise ApiError(400, "invalid_embedding", f"Embedding must be a list of {dim} numbers.")
-    for v in emb:
+    for v in vec:
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ApiError(400, "invalid_embedding", "Embedding must contain only numbers.")
         if not math.isfinite(v):
             raise ApiError(400, "invalid_embedding", "Embedding contains NaN or infinite values.")
-    arr = np.asarray(emb, dtype=np.float64)
+    arr = np.asarray(vec, dtype=np.float64)
     norm = float(np.linalg.norm(arr))
-    if not math.isfinite(norm) or not (0.98 <= norm <= 1.02):
+    if not (0.98 <= norm <= 1.02):
         raise ApiError(400, "invalid_embedding", "Embedding is not L2-normalised.")
     return arr / norm
 
 
-def parse_register(data, cfg):
+def _num(q, key, lo, hi, required=False):
+    v = q.get(key)
+    if v is None:
+        if required:
+            raise ApiError(400, "invalid_quality", f"Quality field '{key}' is required.")
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not (lo <= v <= hi):
+        raise ApiError(400, "invalid_quality", f"Quality field '{key}' is out of range.")
+    return float(v)
+
+
+def _frame(item, manifest, require_primary):
+    if not isinstance(item, dict):
+        raise ApiError(400, "invalid_request", "Each sample must be an object.")
+    pose = item.get("pose")
+    if pose not in POSES:
+        raise ApiError(400, "invalid_pose", "Unknown pose.")
+    q = item.get("quality")
+    if not isinstance(q, dict):
+        raise ApiError(400, "invalid_quality", "Quality information is required.")
+    quality = {"score": _num(q, "score", 0, 1, True), "yaw": _num(q, "yaw", -5, 5), "pitch": _num(q, "pitch", -5, 5),
+               "sharpness": _num(q, "sharpness", 0, 1e6), "brightness": _num(q, "brightness", 0, 255),
+               "detection": _num(q, "detection", 0, 1), "agreement": _num(q, "agreement", 0, 1)}
+    embs = item.get("embeddings")
+    if not isinstance(embs, dict) or not embs:
+        raise ApiError(400, "invalid_embedding", "Embeddings are required.")
+    out = {}
+    for mid, e in embs.items():
+        if mid not in manifest.recognizers:
+            raise ApiError(409, "model_mismatch", "Unknown recognition model. Please reload the page.")
+        if not isinstance(e, dict) or e.get("version") != manifest.version(mid):
+            raise ApiError(409, "model_mismatch", "The face model on this device does not match the server. Please reload the page.")
+        out[mid] = validate_vector(e.get("vector"), manifest.dim(mid))
+    if require_primary and manifest.primary not in out:
+        raise ApiError(400, "invalid_embedding", "The primary model embedding is required.")
+    return {"pose": pose, "quality": quality, "vecs": out}
+
+
+def _frames(items, manifest, require_primary):
+    if not isinstance(items, list) or not (1 <= len(items) <= MAX_SAMPLES):
+        raise ApiError(400, "invalid_request", f"Between 1 and {MAX_SAMPLES} samples are required.")
+    frames = [_frame(i, manifest, require_primary) for i in items]
+    ids = {frozenset(f["vecs"]) for f in frames}
+    if len(ids) != 1:
+        raise ApiError(400, "invalid_embedding", "Every sample must contain the same set of models.")
+    return frames
+
+
+def parse_register(data, manifest, cfg):
     if not isinstance(data, dict):
         raise ApiError(400, "invalid_request", "Request body must be a JSON object.")
     name = validate_name(data.get("name"))
     validate_consent(data)
-    validate_model(data, cfg)
-    embs = data.get("embeddings")
-    if not isinstance(embs, list) or len(embs) != cfg.SAMPLES_REQUIRED:
-        raise ApiError(400, "invalid_embedding", f"Exactly {cfg.SAMPLES_REQUIRED} embeddings are required.")
-    arr = np.stack([validate_embedding(e, cfg.EMBEDDING_DIM) for e in embs])
-    sims = arr @ arr.T
-    iu = np.triu_indices(len(arr), k=1)
-    if float(sims[iu].min()) < cfg.SELF_CONSISTENCY_MIN:
-        raise ApiError(422, "inconsistent_samples",
-                       "The three samples do not look like the same person. Please try again.")
-    return name, arr
+    frames = _frames(data.get("samples"), manifest, True)
+    if cfg.ENROLL_REQUIRE_ALL and set(frames[0]["vecs"]) != set(manifest.recognizers):
+        raise ApiError(400, "invalid_embedding", "All recognition models are required for registration.")
+    return name, frames
 
 
-def parse_recognize(data, cfg):
+def parse_recognize(data, manifest):
     if not isinstance(data, dict):
         raise ApiError(400, "invalid_request", "Request body must be a JSON object.")
     validate_consent(data)
-    validate_model(data, cfg)
-    return validate_embedding(data.get("embedding"), cfg.EMBEDDING_DIM)
+    return _frames(data.get("frames"), manifest, False), data.get("final") is True

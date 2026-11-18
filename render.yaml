@@ -1,17 +1,23 @@
 # Optional Render Blueprint. Render Dashboard -> New + -> Blueprint -> pick this repo.
-# MONGODB_URI is NOT stored here: Render asks you for it (sync: false).
+# Secrets are NOT stored here: Render asks for them (sync: false).
 services:
   - type: web
     name: face-recognition
     runtime: python
     plan: free
+    # Installs dependencies, then downloads + verifies EVERY model from models/model_manifest.json (build fails if any is missing/corrupt).
     buildCommand: pip install -r requirements.txt && sh scripts/download_models.sh
-    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
     healthCheckPath: /api/health
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
       - key: TRUST_PROXY
         value: "true"
+      # The InsightFace weights are free for NON-COMMERCIAL research only (see MODEL_LICENSES.md). "1" = you confirm that use.
+      - key: ACCEPT_NONCOMMERCIAL_MODEL_LICENSES
+        value: "1"
       - key: MONGODB_URI
+        sync: false
+      - key: TEMPLATE_ENCRYPTION_KEY
         sync: false

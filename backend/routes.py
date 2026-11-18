@@ -62,8 +62,8 @@ def index():
 def public_config():
     c = svc().cfg
     rate_limit("default", c.RATE_DEFAULT_PER_MINUTE, 60)
-    return jsonify({"model_name": c.MODEL_NAME, "model_version": c.MODEL_VERSION,
-                    "embedding_dim": c.EMBEDDING_DIM, "samples_required": c.SAMPLES_REQUIRED})
+    s = svc()
+    return jsonify(s.manifest.public(s.calibration.consistency_min(s.manifest.primary)))
 
 
 @bp.get("/api/health")
@@ -71,7 +71,9 @@ def health():
     rate_limit("default", svc().cfg.RATE_DEFAULT_PER_MINUTE, 60)
     try:
         svc().repo().ping()
-        return jsonify({"status": "ok", "database": "ok"})
+        s = svc()
+        return jsonify({"status": "ok", "database": "ok", "encryption": "enabled" if s.cipher.enabled else "disabled",
+                        "thresholds_calibrated": s.calibration.calibrated})
     except RepositoryError as exc:
         current_app.logger.warning("health: database unavailable: %s", exc)
         return jsonify({"status": "degraded", "database": "unavailable"}), 503
@@ -81,8 +83,9 @@ def health():
 def register_face():
     cfg = svc().cfg
     rate_limit("register", cfg.RATE_REGISTER_PER_HOUR, 3600)
-    name, embeddings = parse_register(read_json(), cfg)
-    status, body = registration.register_face(svc().repo(), cfg, name, embeddings)
+    s = svc()
+    name, frames = parse_register(read_json(), s.manifest, cfg)
+    status, body = registration.register_face(s.repo(), cfg, s.manifest, s.calibration, name, frames)
     return jsonify(body), status
 
 
@@ -90,6 +93,7 @@ def register_face():
 def recognize_face():
     cfg = svc().cfg
     rate_limit("recognize", cfg.RATE_RECOGNIZE_PER_MINUTE, 60)
-    embedding = parse_recognize(read_json(), cfg)
-    status, body = registration.recognize_face(svc().repo(), cfg, embedding)
+    s = svc()
+    frames, final = parse_recognize(read_json(), s.manifest)
+    status, body = registration.recognize_face(s.repo(), cfg, s.manifest, s.calibration, frames, final)
     return jsonify(body), status

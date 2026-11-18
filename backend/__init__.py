@@ -4,7 +4,9 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from config import Config
+from .crypto import CryptoError, TemplateCipher
 from .database import MongoRepository, RepositoryError
+from .manifest import Calibration, Manifest
 from .routes import RateLimiter, bp
 from .validation import ApiError
 
@@ -15,25 +17,28 @@ CSP = ("default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'wasm-uns
 
 
 class Services:
-    def __init__(self, cfg, repository=None):
+    def __init__(self, cfg, repository=None, manifest=None, calibration=None):
         self.cfg, self.limiter, self._repo = cfg, RateLimiter(), repository
+        self.manifest = manifest or Manifest.load(cfg.MANIFEST_FILE or None)
+        self.calibration = calibration or Calibration.load(self.manifest, cfg.CALIBRATION_FILE or None)
+        self.cipher = TemplateCipher(cfg.TEMPLATE_ENCRYPTION_KEY)
 
     def repo(self):
         """Create the DB connection lazily so the app boots even if the DB is down."""
         if self._repo is None:
             self._repo = MongoRepository(self.cfg.MONGODB_URI, self.cfg.MONGODB_DB_NAME,
-                                         self.cfg.MONGODB_COLLECTION, self.cfg.RETENTION_DAYS)
+                                         self.cfg.MONGODB_COLLECTION, self.cfg.RETENTION_DAYS, self.cipher)
         return self._repo
 
 
-def create_app(cfg=None, repository=None):
+def create_app(cfg=None, repository=None, manifest=None, calibration=None):
     cfg = cfg or Config.from_env()
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
     app.config["MAX_CONTENT_LENGTH"] = cfg.MAX_CONTENT_LENGTH
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 86400
     if cfg.TRUST_PROXY:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
-    app.extensions["facerec"] = Services(cfg, repository)
+    app.extensions["facerec"] = Services(cfg, repository, manifest, calibration)
     app.register_blueprint(bp)
 
     def err(status, code, message, headers=None):
@@ -46,6 +51,11 @@ def create_app(cfg=None, repository=None):
     @app.errorhandler(ApiError)
     def _api(e):
         return err(e.status, e.code, e.message, e.headers)
+
+    @app.errorhandler(CryptoError)
+    def _crypto(e):
+        app.logger.error("encryption error: %s", e)
+        return err(500, "server_misconfigured", "The server is misconfigured. Please contact the site owner.")
 
     @app.errorhandler(RepositoryError)
     def _db(e):

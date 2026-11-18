@@ -1,0 +1,7 @@
+{
+  "name": "face-recognition-engine-tests",
+  "private": true,
+  "description": "Dev-only dependencies for the Node tests of the browser engine. Not needed on Render.",
+  "scripts": { "test": "node --test tests/js/*.test.mjs" },
+  "devDependencies": { "jpeg-js": "^0.4.4", "onnxruntime-node": "^1.17.0" }
+}

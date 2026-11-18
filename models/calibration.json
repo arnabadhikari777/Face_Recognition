@@ -1,0 +1,18 @@
+{
+  "calibrated": false,
+  "note": "PROVISIONAL engineering defaults, NOT validated on your population. Generate real values with `python tools/calibrate.py` from a consented genuine/impostor evaluation set (see MODEL_BENCHMARK_BN.md) and replace this file.",
+  "models": {
+    "w600k_mbf": { "threshold": 0.35, "scale": 0.06, "consistency_min": 0.2, "weight": 1.0 },
+    "w600k_r50": { "threshold": 0.33, "scale": 0.06, "consistency_min": 0.2, "weight": 1.0 }
+  },
+  "frame_score": { "master": 0.4, "individual": 0.4, "pose": 0.2, "individual_top_k": 2 },
+  "decision": {
+    "match_z": 0.0,
+    "uncertain_z": -1.0,
+    "margin_z": 1.0,
+    "secondary_z": 2.0,
+    "min_support_frac": 0.5,
+    "model_agreement_tol_z": 0.5,
+    "frame_outlier_mad_k": 3.0
+  }
+}
