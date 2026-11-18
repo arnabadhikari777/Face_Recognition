@@ -14,5 +14,7 @@
 | 422 insufficient_samples / inconsistent_samples / low_quality | ভালো আলো, স্থির মাথা, একজনই ফ্রেমে; আবার রেজিস্টার। |
 | 503 busy | আরেকটি রেজিস্ট্রেশন চলছে; কয়েক সেকেন্ড পরে। |
 | ক্যামেরা চলে না | HTTPS লাগে (Render-এ আছে); ব্রাউজারে ক্যামেরা অনুমতি দিন। |
+| Processing mode ড্রপডাউন খালি / Start Camera-এর আগে কনফিগ লোড হয়নি | পুরনো বাগে `/api/config` অ্যাসিঙ্ক লোড শেষ হওয়ার আগে Start চাপা যেত। বর্তমান কোড কনফিগ রেডি না হওয়া পর্যন্ত Start ডিজেবল রাখে; ফেল হলে রিট্রাই/রিলোড মেসেজ দেখায়। |
+| "Something went wrong. Please reload…" | নেটওয়ার্ক/মডেল/ওয়ার্কার ত্রুটি আগে জেনেরিক মেসেজে ঢাকা পড়ত। এখন CameraError, EngineError (MODEL_MISSING, WORKER ইত্যাদি) আলাদা বার্তা দেয়। |
 | বারবার UNCERTAIN | থ্রেশহোল্ড অ-ক্যালিব্রেটেড — `MODEL_BENCHMARK_BN.md` |
 | `/api/health` → `"encryption": "disabled"` | `TEMPLATE_ENCRYPTION_KEY` সেট নেই; ঐচ্ছিক কিন্তু সুপারিশকৃত। |
