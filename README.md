@@ -11,10 +11,7 @@ Flask + template matching; MongoDB Atlas stores encrypted numeric templates. Raw
 ## Honest status
 * Real-world accuracy is **not measured**: no consented evaluation dataset was available. Thresholds in `models/calibration.json` are provisional (`calibrated:false`). `tools/benchmark.py` + `tools/calibrate.py` are provided to do it on your data.
 * The browser code (Web Worker, WebGPU fallback, Cache API, camera, UI) was **not run in a real browser or phone**. The identical engine core was run in Node with the real ONNX models and compared with an independent cv2/onnxruntime reference.
-* The InsightFace weights are **non-commercial research only** — see `MODEL_LICENSES.md`.
-
-## Documentation
-`DEPLOYMENT_BN.md`, `MODEL_DOWNLOAD_GUIDE_BN.md`, `MODEL_BENCHMARK_BN.md`, `DATABASE_MIGRATION_BN.md`, `TROUBLESHOOTING_BN.md`, `ARCHITECTURE_BN.md`, `MODEL_LICENSES.md`.
+* Some downloaded model weights may be restricted to non-commercial research use. Review each model's license before deployment.
 
 ## Render
 Build: `pip install -r requirements.txt && sh scripts/download_models.sh`

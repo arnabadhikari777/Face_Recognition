@@ -6,7 +6,7 @@
  * every final .onnx is checked: SHA-256, size, valid ONNX protobuf header
  * already verified files are not downloaded again; corrupted files are deleted and fetched again
  * any required model that cannot be prepared => exit code 1 (the Render build fails; nothing is skipped silently)
- * models whose licence class is "noncommercial" need ACCEPT_NONCOMMERCIAL_MODEL_LICENSES=1 (see MODEL_LICENSES.md)
+ * models whose licence class is "noncommercial" need ACCEPT_NONCOMMERCIAL_MODEL_LICENSES=1
 
 Environment (all optional): MODELS_DEST (default static/models), MODEL_SEED_DIR (local folder with already downloaded files,
 used before the network - handy offline), DOWNLOAD_RETRIES (default 4), ACCEPT_NONCOMMERCIAL_MODEL_LICENSES.
@@ -100,7 +100,7 @@ def main():
         target = os.path.join(DEST, m["filename"])
         if m["license"]["class"] == "noncommercial" and not accept_nc:
             failures.append(f"{m['id']}: licence '{m['license']['name']}' is non-commercial. Set ACCEPT_NONCOMMERCIAL_MODEL_LICENSES=1 "
-                            "only if your use is personal/non-commercial research (see MODEL_LICENSES.md).")
+                            "only if your use is personal/non-commercial research.")
             continue
         if verify(target, m["sha256"], m["size_bytes"], m["id"]):
             log(f"{m['id']}: already verified, skipping")

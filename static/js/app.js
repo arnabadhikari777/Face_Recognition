@@ -53,7 +53,7 @@ function showLoading(text, pct) {
 function friendly(e) {
   if (e instanceof CameraError) return e.message;
   if (e instanceof EngineError) {
-    if (e.code === 'MODEL_MISSING') return 'The face model files are missing on the server. The site owner must check the deployment (see TROUBLESHOOTING_BN.md).';
+    if (e.code === 'MODEL_MISSING') return 'The face model files are missing on the server. The site owner must check the deployment.';
     if (e.code === 'MODEL_CORRUPT' || e.code === 'MODEL_FETCH') return e.message;
     if (e.code === 'NO_WORKER') return e.message;
     if (e.code === 'WORKER') return e.message;

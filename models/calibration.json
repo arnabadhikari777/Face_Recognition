@@ -1,6 +1,6 @@
 {
   "calibrated": false,
-  "note": "PROVISIONAL engineering defaults, NOT validated on your population. Generate real values with `python tools/calibrate.py` from a consented genuine/impostor evaluation set (see MODEL_BENCHMARK_BN.md) and replace this file.",
+  "note": "PROVISIONAL engineering defaults, NOT validated on your population. Generate real values with `python tools/calibrate.py` from a consented genuine/impostor evaluation set and replace this file.",
   "models": {
     "w600k_mbf": { "threshold": 0.35, "scale": 0.06, "consistency_min": 0.2, "weight": 1.0 },
     "w600k_r50": { "threshold": 0.33, "scale": 0.06, "consistency_min": 0.2, "weight": 1.0 }

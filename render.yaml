@@ -14,7 +14,7 @@ services:
         value: 3.12.3
       - key: TRUST_PROXY
         value: "true"
-      # The InsightFace weights are free for NON-COMMERCIAL research only (see MODEL_LICENSES.md). "1" = you confirm that use.
+      # InsightFace weights are restricted to non-commercial research use. "1" confirms that use.
       - key: ACCEPT_NONCOMMERCIAL_MODEL_LICENSES
         value: "1"
       - key: MONGODB_URI
