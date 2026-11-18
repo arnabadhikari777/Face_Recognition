@@ -1,0 +1,5 @@
+[init]
+	defaultBranch = main
+[user]
+	name = আপনার নাম
+	email = ваш_email@example.com
